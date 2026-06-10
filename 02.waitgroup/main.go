@@ -79,8 +79,29 @@ func Exp2() { //通过waitgroup进行交替打印
 	}
 }
 
+func Print4(ch chan sync.WaitGroup) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ch <- wg
+	fmt.Println("wait for P4")
+	time.Sleep(time.Second * 2)
+	wg.Done()
+}
+
+func Print5(ch chan sync.WaitGroup) {
+	wg := <-ch //channel是值传递
+	//wg.Done()
+	wg.Wait()
+}
+
+func Exp3() { //进程间channel通信能够传递waitgroup吗
+	ch := make(chan sync.WaitGroup, 10)
+	Print4(ch)
+	Print5(ch)
+}
+
 func main() {
 
-	Exp2()
+	Exp3()
 
 }
