@@ -90,7 +90,7 @@ func Print4(ch chan sync.WaitGroup) {
 
 func Print5(ch chan sync.WaitGroup) {
 	wg := <-ch //channel是值传递
-	//wg.Done()
+	wg.Done()
 	wg.Wait()
 }
 
@@ -100,8 +100,19 @@ func Exp3() { //进程间channel通信能够传递waitgroup吗
 	Print5(ch)
 }
 
+func Exp4() { //Go方法是一个语法糖，封装了add和done
+	wg := sync.WaitGroup{}
+	wg.Go(func() {
+		fmt.Println("等待函数执行完")
+		time.Sleep(time.Second * 2)
+	})
+
+	wg.Wait()
+	fmt.Println("完成执行")
+}
+
 func main() {
 
-	Exp3()
+	Exp4()
 
 }
