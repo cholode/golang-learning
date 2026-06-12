@@ -79,26 +79,28 @@ func Exp2() { //通过waitgroup进行交替打印
 	}
 }
 
-func Print4(ch chan sync.WaitGroup) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	ch <- wg
-	fmt.Println("wait for P4")
-	time.Sleep(time.Second * 2)
-	wg.Done()
-}
+//不注释会爆黄
 
-func Print5(ch chan sync.WaitGroup) {
-	wg := <-ch //channel是值传递
-	wg.Done()
-	wg.Wait()
-}
+// func Print4(ch chan sync.WaitGroup) {
+// 	var wg sync.WaitGroup
+// 	wg.Add(1)
+// 	ch <- wg
+// 	fmt.Println("wait for P4")
+// 	time.Sleep(time.Second * 2)
+// 	wg.Done()
+// }
 
-func Exp3() { //进程间channel通信能够传递waitgroup吗
-	ch := make(chan sync.WaitGroup, 10)
-	Print4(ch)
-	Print5(ch)
-}
+// func Print5(ch chan sync.WaitGroup) {
+// 	wg := <-ch //channel是值传递
+// 	wg.Done()
+// 	wg.Wait()
+// }
+
+// func Exp3() { //进程间channel通信能够传递waitgroup吗
+// 	ch := make(chan sync.WaitGroup, 10)
+// 	Print4(ch)
+// 	Print5(ch)
+// }
 
 func Exp4() { //Go方法是一个语法糖，封装了add和done
 	wg := sync.WaitGroup{}
@@ -111,8 +113,30 @@ func Exp4() { //Go方法是一个语法糖，封装了add和done
 	fmt.Println("完成执行")
 }
 
+func Print7(wg *sync.WaitGroup) {
+	fmt.Println("7等待主协程完成任务")
+	wg.Wait()
+	fmt.Println("任务完成，7退出")
+}
+
+func Print8(wg *sync.WaitGroup) {
+	fmt.Println("8等待主协程完成任务")
+	wg.Wait()
+	fmt.Println("任务完成，8退出")
+}
+
+func Exp5() { //子协程可以让主协程等待，主协程也可以让子协程等待
+	wg := new(sync.WaitGroup)
+	wg.Add(1)
+	go Print7(wg)
+	go Print8(wg)
+	time.Sleep(time.Second * 2)
+	wg.Done()
+	time.Sleep(time.Second * 2)
+}
+
 func main() {
 
-	Exp4()
+	Exp5()
 
 }

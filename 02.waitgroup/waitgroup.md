@@ -2,6 +2,7 @@
 
         waitgroup主要是用于用wait阻塞当前协程，然后让其他协程调用done来减少wait的数量，然后是用add增加要等待的数量，另外waitgroup是不能够进行复制的
 
+
 ```go
     var wg sync.WaitGroup
 
