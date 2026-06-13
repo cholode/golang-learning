@@ -84,7 +84,13 @@ func Exp2() { //通过waitgroup进行交替打印
 
         通过这个方法就能够做到一步一步的进行释放，上锁阻塞，或许我可以换一个理解，waitgroup本质上是一个拓扑排序的过程
 
-        不过上面的代码有一个非常严重的问题，waitgroup在执行wg[2].Wait的时候是有一段时间的延迟，在wait放行但是wait还没有结束的时候，如果马上执行了一个add，就会爆panic
+        不过上面的代码有一个非常严重的问题，waitgroup在执行wg[2].Wait的时候是有一段时间的延迟，在wait放行但是wait还没有结束的时候，如果马上执行了一个add，就会爆panic，也就是下面的代码
+
+```go
+if w != 0 && delta > 0 && v == int32(delta) {
+    panic("sync: WaitGroup misuse: Add called concurrently with Wait")
+}
+```
 
 ### Exp3 用channel传递waitgroup
 
