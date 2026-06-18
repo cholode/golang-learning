@@ -82,9 +82,9 @@ func (m *Mutex) lockSlow() {
             if old&(mutexLocked|mutexStarving) == 0 {
                 break // locked the mutex with CAS
             }
-            queueLifo := waitStartTime != 0 //挂起策略
-            if waitStartTime == 0 {
-                waitStartTime = runtime_nanotime()
+            queueLifo := waitStartTime != 0 //不等于0说明是被唤醒的，需要后进先出
+            if waitStartTime == 0 {//如果是第一次进入锁的协程
+                waitStartTime = runtime_nanotime()//记录时间戳
             }        
             runtime_SemacquireMutex(&m.sema, queueLifo, 2)//将协程挂起
 
@@ -98,7 +98,7 @@ func (m *Mutex) lockSlow() {
                 }
                 //上锁且减去一个阻塞协程，因为这个协程要被唤醒了
                 delta := int32(mutexLocked - 1<<mutexWaiterShift)
-                if !starving || old>>mutexWaiterShift == 1 {//已经不饥饿了且等待协程只有一个
+                if !starving || old>>mutexWaiterShift == 1 {//已经不饥饿了或等待协程只有一个
                     delta -= mutexStarving//关闭饥饿模式
                 }
                 atomic.AddInt32(&m.state, delta)
@@ -125,6 +125,41 @@ func (m *Mutex) lockSlow() {
 - **P 的本地队列为空 (`!runqempty(p)`)**：如果当前 P 的本地队列里还有别的 Goroutine 等着被执行，你绝对不能自旋占着茅坑不拉屎。
 
         倘若有线程释放了锁，那么等待队列必定会有协程被唤醒，虽然抢不过自旋的协程，但是在唤醒的时候就能够和最久饥饿时间进行比较，这样就能够避免因系统极其空闲，自旋条件完美满足，新来的协程像潮水一样涌来，完美地无缝衔接，一个接一个地在 `Unlock` 的瞬间通过自旋截胡拿到了锁。
+
+下面是状态变化图
+
+```mermaid
+graph TD
+    Start["Goroutine 发起 Lock 请求"] --> FastPath{"Fast Path: CAS state 0->1?"}
+    FastPath -- "成功(无竞争)" --> GotLock(("成功获取锁"))
+    FastPath -- "失败(发生碰撞)" --> SlowPath["坠入 lockSlow 慢路径"]
+
+    SlowPath --> CheckSpin{"判断自旋条件: 锁被占用 且 非饥饿 且 P空闲 且 次数<4?"}
+
+    CheckSpin -- "是" --> Spin["在 CPU 执行 PAUSE 空转并标记 Woken"]
+    Spin --> CalcNewState["计算新的 state 期望值"]
+    CheckSpin -- "否" --> CalcNewState
+
+    CalcNewState --> TryCAS{"尝试 CAS 提交新状态"}
+    TryCAS -- "失败(被截胡)" --> CheckSpin
+    TryCAS -- "成功" --> CheckGotLock{"新状态下自己拿到锁了吗?"}
+
+    CheckGotLock -- "是(截胡成功)" --> GotLock
+    CheckGotLock -- "否(排队去)" --> SemAcquire["陷入 runtime_SemacquireMutex 休眠排队"]
+
+    SemAcquire -.->|"被 OS 唤醒"| WokenUp("从休眠中苏醒")
+    WokenUp --> CheckWaitTime{"排队时间超过 1ms 吗?"}
+
+    CheckWaitTime -- "否(不拥堵)" --> CheckSpin
+    CheckWaitTime -- "是(触发红线)" --> SetStarving["下一次 CAS 标记 mutexStarving = 1"]
+    SetStarving --> CheckSpin
+
+    GotLock --> UnlockReq["Goroutine 发起 Unlock 请求"]
+```
+
+        mutex的报错都是**不可恢复**的throw和fatal
+
+##### 解锁源码
 
 ```go
 func (m *Mutex) Unlock() {
@@ -162,50 +197,31 @@ func (m *Mutex) unlockSlow(new int32) {
 }
 ```
 
-下面是状态变化图
+        下面是解锁的流程图
 
 ```mermaid
 graph TD
-    Start["Goroutine 发起 Lock 请求"] --> FastPath{"Fast Path: CAS state 0->1?"}
-    FastPath -- "成功(无竞争)" --> GotLock(("成功获取锁"))
-    FastPath -- "失败(发生碰撞)" --> SlowPath["坠入 lockSlow 慢路径"]
+    Start["Goroutine 执行 Unlock()"] --> FastPath{"原子操作: 减去 Locked 位 (state - 1)<br>减完后 state 变成纯 0 了吗？"}
 
-    SlowPath --> CheckSpin{"判断自旋条件: 锁被占用 且 非饥饿 且 P空闲 且 次数<4?"}
-    
-    CheckSpin -- "是" --> Spin["在 CPU 执行 PAUSE 空转并标记 Woken"]
-    Spin --> CalcNewState["计算新的 state 期望值"]
-    CheckSpin -- "否" --> CalcNewState
-    
-    CalcNewState --> TryCAS{"尝试 CAS 提交新状态"}
-    TryCAS -- "失败(被截胡)" --> CheckSpin
-    TryCAS -- "成功" --> CheckGotLock{"新状态下自己拿到锁了吗?"}
+    FastPath -- "是 (无人排队且无其他状态)" --> Success(("解锁极速完成 (Fast Path)"))
+    FastPath -- "否 (有情况)" --> SlowPath["坠入 unlockSlow 慢路径"]
 
-    CheckGotLock -- "是(截胡成功)" --> GotLock
-    CheckGotLock -- "否(排队去)" --> SemAcquire["陷入 runtime_SemacquireMutex 休眠排队"]
+    SlowPath --> CheckMode{"检查状态位: 当前处于饥饿模式吗？"}
 
-    SemAcquire -.->|"被 OS 唤醒"| WokenUp("从休眠中苏醒")
-    WokenUp --> CheckWaitTime{"排队时间超过 1ms 吗?"}
-    
-    CheckWaitTime -- "否(不拥堵)" --> CheckSpin
-    CheckWaitTime -- "是(触发红线)" --> SetStarving["下一次 CAS 标记 mutexStarving = 1"]
-    SetStarving --> CheckSpin
+    %% 正常模式分支
+    CheckMode -- "否 (正常模式)" --> CheckWaiters{"检查状态: <br>1. 等待队列是空的吗？<br>2. 锁又被别人抢了？<br>3. 已经有别的协程被唤醒了？"}
 
-    GotLock --> UnlockReq["Goroutine 发起 Unlock 请求"]
-    UnlockReq --> UFastPath{"Fast Path: CAS 减去 Locked 位后 state==0?"}
+    CheckWaiters -- "满足任意一项" --> BailOut["无需多管闲事，直接退出"] --> Success
 
-    UFastPath -- "成功(无人在等)" --> Unlocked(("锁彻底释放"))
-    UFastPath -- "失败(有人等/异构)" --> USlowPath["坠入 unlockSlow 慢路径"]
+    CheckWaiters -- "全不满足 (需要我去叫人)" --> SetWoken["尝试 CAS: 等待者数量减 1，并设置 Woken 唤醒标志"]
+    SetWoken -- "CAS 失败 (状态中途被改)" --> CheckWaiters
+    SetWoken -- "CAS 成功" --> NormalWake["执行底层 Semrelease(handoff=false)<br>唤醒队首协程，让它自己去自旋抢锁"]
+    NormalWake --> Success
 
-    USlowPath --> CheckMode{"当前是饥饿模式吗?"}
-    
-    CheckMode -- "否(正常模式)" --> NormalWake["执行 runtime_Semrelease 唤醒队首竞争"]
-    NormalWake --> Unlocked
-    
-    CheckMode -- "是(饥饿模式)" --> StarvingWake["精准投递: 不清 Locked，直接喂给队首饥饿者"]
-    StarvingWake --> Unlocked
+    %% 饥饿模式分支
+    CheckMode -- "是 (饥饿模式)" --> StarvingHandoff["【绝对交接】不做任何状态修改运算<br>直接执行底层 Semrelease(handoff=true)<br>将锁精准投递给队首的饥饿者"]
+    StarvingHandoff --> Success
 ```
-
-
 
 ### Exp1  用mutex防止竞争
 
