@@ -223,6 +223,25 @@ graph TD
     StarvingHandoff --> Success
 ```
 
+##### trylock
+
+trylock的作用就是非阻塞上锁，如果没有上锁，那就返回false，上锁成功则返回true
+
+```go
+func (m *Mutex) TryLock() bool {
+    old := m.state
+    if old&(mutexLocked|mutexStarving) != 0 {//已经锁了或者处于饥饿
+        return false
+    }
+
+    if !atomic.CompareAndSwapInt32(&m.state, old, old|mutexLocked) {//上锁失败
+        return false
+    }
+
+    return true
+}
+```
+
 ### Exp1  用mutex防止竞争
 
 ```go
