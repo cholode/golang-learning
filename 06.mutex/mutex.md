@@ -3,7 +3,7 @@
 ### 源码
 
 ```go
-type Mutex struct {
+type Mutex struct {//这是internal的mutex，外面的包不能调用
     state int32
     sema  uint32
 }
@@ -241,6 +241,16 @@ func (m *Mutex) TryLock() bool {
     return true
 }
 ```
+
+```go
+type Mutex struct {
+	_ noCopy
+
+	mu isync.Mutex
+}
+
+```
+sync的mutex不能复制
 
 ### Exp1  用mutex防止竞争
 
