@@ -36,6 +36,7 @@ func Exp4() {
 	fmt.Println(slices.Insert(s, 1, 99, 98)) // 输出 [1 99 98 2 3]
 }
 
+// Reverse
 func Exp5() {
 	// reverse 进行翻转
 	s := []int{1, 2, 3}
@@ -43,6 +44,15 @@ func Exp5() {
 	fmt.Println(s) // 输出 [3 2 1]
 }
 
+// Grow
+func Exp6() { // 将剩余容量设置为至少为指定数，可能会更大
+	s := []int{1, 2, 3}
+	s = slices.Grow(s, 4)
+	fmt.Println(cap(s))
+	s = slices.Grow(s, 5) // 两个的结果一样
+	fmt.Println(cap(s))
+}
+
 func main() {
-	Exp5()
+	Exp6()
 }
