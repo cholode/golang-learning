@@ -53,6 +53,39 @@ func Exp6() { // 将剩余容量设置为至少为指定数，可能会更大
 	fmt.Println(cap(s))
 }
 
+// s[i:j:k]的引用实验最终的0 <= i <= j <= k <= cap(s)
+func Exp7() {
+	s := make([]int, 5, 10)
+	for i := 0; i < 5; i++ {
+		s[i] = i + 1
+	}
+	s1 := s[2:4:6] // 最后容量是[2:6],6-2=4
+	var s2 []int
+	s2 = s[2:4]
+
+	s1[1] = 1
+	fmt.Println(s)       // [1 2 3 1 5]
+	fmt.Println(s1)      // [3 1]
+	fmt.Println(s2)      // [3 1]
+	fmt.Println(cap(s1)) // 3
+	fmt.Println(cap(s2)) // 8
+}
+
+// append
+func Exp8() {
+	s := []int{1, 2, 3, 4, 5, 6}
+	s = append(s[:1], 6) // [1 6] append不会把拼接部分开始到后面的部分舍弃，只是缩短了len
+	fmt.Println(s)
+	fmt.Println(s[:cap(s)]) // [1 6 3 4 5 6] 后面的部分还在
+}
+
+// Delete
+func Exp9() {
+	s := []int{1, 2, 3, 4, 5, 6}
+	s = slices.Delete(s, 1, 3) // [1 6] append不会把拼接部分开始到后面的部分舍弃，只是缩短了len
+	fmt.Println(s)
+}
+
 func main() {
-	Exp6()
+	Exp9()
 }
