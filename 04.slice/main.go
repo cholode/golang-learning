@@ -86,6 +86,13 @@ func Exp9() {
 	fmt.Println(s)
 }
 
+// Replace
+func Exp10() {
+	s := []int{1, 2, 3, 4, 5, 6}
+	s = slices.Replace(s, 1, 3, 7, 8, 9, 10) // [1 6] replace和delete差不多，不过是copy一个新的，会自动扩容
+	fmt.Println(s)                           // [1 7 8 9 10 4 5 6]
+}
+
 func main() {
-	Exp9()
+	Exp10()
 }
