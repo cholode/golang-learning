@@ -82,7 +82,7 @@ func Exp8() {
 // Delete
 func Exp9() {
 	s := []int{1, 2, 3, 4, 5, 6}
-	s = slices.Delete(s, 1, 3) // [1 6] append不会把拼接部分开始到后面的部分舍弃，只是缩短了len
+	s = slices.Delete(s, 1, 3) // [1 6]
 	fmt.Println(s)
 }
 
