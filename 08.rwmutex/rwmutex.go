@@ -22,7 +22,6 @@ const rwmutexMaxReaders = 1 << 30
 func (rw *RWMutex) RLock() {
 
 	if rw.readerCount.Add(1) < 0 {
-		// A writer is pending, wait for it.
 		runtime_SemacquireRWMutexR(&rw.readerSem, false, 0)
 	}
 
