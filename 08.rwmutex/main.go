@@ -14,6 +14,7 @@ func Exp1() {
 	// 3个读协程：共享读锁，可同时执行
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
+		time.Sleep(time.Millisecond * 100)
 		go func() {
 			defer wg.Done()
 			for {
@@ -38,7 +39,7 @@ func Exp1() {
 		defer wg.Done()
 		rw.Lock() // 加写锁
 		val = 42
-		fmt.Println("写入中")
+		fmt.Println("42写入中")
 		time.Sleep(time.Millisecond * 1000)
 		rw.Unlock() // 解写锁
 	}()
