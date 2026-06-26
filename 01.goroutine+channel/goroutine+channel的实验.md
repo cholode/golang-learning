@@ -4,6 +4,8 @@
 
 ### channel源码
 
+##### channel 管道的数据结构
+
 ```go
 type hchan struct {
     // ---------- 环形缓冲区核心字段 ----------
@@ -72,6 +74,105 @@ type hchan struct {
 
 ```
 
+##### 内存分配的源码
+
+```go
+// makechan 是 Go 运行时创建 channel 的底层实现函数
+// 对应用户层代码 make(chan T, size) 的底层调用
+// 参数：
+//   t    *chantype - channel 的类型元信息，包含元素类型、大小、对齐、是否含指针等属性
+//   size int       - channel 缓冲区容量，即 make 时指定的缓冲大小
+// 返回值：
+//   *hchan - 初始化完成的 channel 底层结构体指针
+func makechan(t *chantype, size int) *hchan {
+	// 提取 channel 存储元素的类型元信息
+	elem := t.Elem
+
+	// ========== 第一阶段：参数合法性校验 ==========
+
+	// 限制单个元素大小不超过 64KB（1<<16 = 65536 字节）
+	// 过大的元素会导致 channel 拷贝开销剧增，Go 直接禁止该场景
+	if elem.Size_ >= 1<<16 {
+		throw("makechan: invalid channel element type")
+	}
+
+	// 内存对齐合法性校验
+	// 1. hchan 结构体自身大小必须是系统最大对齐数的整数倍，保证结构体内存布局对齐
+	// 2. 元素的对齐要求不能超过系统最大对齐上限，否则缓冲区内存无法正确排布
+	if hchanSize%maxAlign != 0 || elem.Align_ > maxAlign {
+		throw("makechan: bad alignment")
+	}
+
+	// ========== 第二阶段：安全计算缓冲区总内存 ==========
+
+	// math.MulUintptr 安全计算「单个元素大小 × 缓冲区容量」的总内存
+	// 返回值 mem 为总字节数，overflow 标记乘法是否发生整数溢出
+	// 相比普通乘法，可避免大数相乘导致的溢出漏洞
+	mem, overflow := math.MulUintptr(elem.Size_, uintptr(size))
+	// 三种非法情况直接 panic：
+	// 1. 乘法计算溢出；2. 总内存超过 Go 单对象最大可分配上限；3. 缓冲区大小为负数
+	if overflow || mem > maxAlloc-hchanSize || size < 0 {
+		panic(plainError("makechan: size out of range"))
+	}
+
+	// ========== 第三阶段：分场景分配内存（核心设计） ==========
+	// 根据元素特性、缓冲区大小，分三种策略分配 hchan 结构体 + 缓冲区内存
+	var c *hchan
+	switch {
+	// 场景1：缓冲区内存为 0
+	// 对应两种情况：无缓冲 channel（size=0），或元素是零大小类型（如 struct{}）
+	case mem == 0:
+		// 仅分配 hchan 结构体本身的内存，无需单独分配数据缓冲区
+		// mallocgc 第三个参数为 true 表示分配后自动清零内存
+		c = (*hchan)(mallocgc(hchanSize, nil, true))
+		// buf 指向 hchan 内部的竞态检测地址
+		// 无缓冲 channel 不存储实际数据，该地址仅用于 race 竞态检测
+		c.buf = c.raceaddr()
+
+	// 场景2：元素不包含指针
+	// 此时 hchan 结构体 + 缓冲区可分配为一段连续内存
+	// 优势：提升内存局部性、减少 GC 扫描开销（无指针则 GC 无需遍历缓冲区）
+	case !elem.Pointers():
+		// 一次性分配「hchan 结构体 + 数据缓冲区」的连续内存块
+		c = (*hchan)(mallocgc(hchanSize+mem, nil, true))
+		// 缓冲区起始地址 = hchan 结构体首地址 + 结构体自身大小
+		// 通过地址偏移直接定位到连续内存中的缓冲区区域
+		c.buf = add(unsafe.Pointer(c), hchanSize)
+
+	// 场景3：元素包含指针（默认分支）
+	// 缓冲区需单独分配，因为 GC 需要扫描缓冲区中的指针引用
+	// 分开分配可避免 hchan 结构体干扰缓冲区的指针扫描逻辑
+	default:
+		// 先分配 hchan 结构体本身
+		c = new(hchan)
+		// 单独分配缓冲区内存，传入元素类型信息
+		// 帮助 GC 正确识别、扫描缓冲区中的指针对象
+		c.buf = mallocgc(mem, elem, true)
+	}
+
+	// ========== 第四阶段：初始化 hchan 核心字段 ==========
+
+	// 单个元素的字节大小，用 uint16 存储以节省结构体内存空间
+	c.elemsize = uint16(elem.Size_)
+	// 保存元素类型元信息，后续用于元素拷贝、GC 扫描、类型校验等
+	c.elemtype = elem
+	// 环形缓冲区的总容量（channel 的缓冲大小）
+	c.dataqsiz = uint(size)
+
+	// 初始化 channel 内部的互斥锁
+	// lockRankHchan 指定锁的优先级等级，Go 运行时通过锁排序避免死锁
+	lockInit(&c.lock, lockRankHchan)
+
+	// ========== 第五阶段：调试输出 ==========
+	// 开启 channel 调试开关（GODEBUG 环境变量控制）时，打印创建详情
+	if debugChan {
+		print("makechan: chan=", c, "; elemsize=", elem.Size_, "; dataqsiz=", size, "\n")
+	}
+
+	// 返回初始化完成的 channel 底层结构体
+	return c
+}
+```
 
 ### Exp1() goroutine和channel的阻塞运行
 
