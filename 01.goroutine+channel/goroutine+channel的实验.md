@@ -174,6 +174,187 @@ func makechan(t *chantype, size int) *hchan {
 }
 ```
 
+##### channel 通道发送源码
+
+```go
+
+// chansend1 是单元素通道发送的包装入口
+// 对应用户层代码 `ch <- x` 的底层调用，默认阻塞模式发送
+// 参数：
+//   c    *hchan         - 目标 channel 底层结构体
+//   elem unsafe.Pointer - 待发送元素的内存地址
+func chansend1(c *hchan, elem unsafe.Pointer) {
+	// 调用核心发送函数，block=true 表示默认阻塞等待
+	// sys.GetCallerPC() 获取调用方程序计数器，用于性能追踪与竞态检测
+	chansend(c, elem, true, sys.GetCallerPC())
+}
+
+// chansend 是 channel 发送操作的核心实现
+// 参数：
+//   c        *hchan         - 目标 channel
+//   ep       unsafe.Pointer - 待发送元素的指针
+//   block    bool           - 是否阻塞模式：true=阻塞等待，false=非阻塞（select 场景使用）
+//   callerpc uintptr        - 调用者 PC 地址，用于 trace 和性能分析
+// 返回值：bool - 发送是否成功
+func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
+	// ========== 阶段1：nil channel 特殊处理 ==========
+	if c == nil {
+		// 非阻塞模式下向 nil channel 发送，直接返回失败
+		if !block {
+			return false
+		}
+		// 阻塞模式下向 nil channel 发送：永久挂起当前 goroutine
+		// gopark 会让出 CPU，且不会被主动唤醒，对应语言规范：nil channel 发送永远阻塞
+		gopark(nil, nil, waitReasonChanSendNilChan, traceBlockForever, 2)
+		// 理论上永远执行不到这里，属于防御性代码
+		throw("unreachable")
+	}
+
+	// channel 调试开关：开启时打印发送日志
+	if debugChan {
+		print("chansend: chan=", c, "\n")
+	}
+
+	// ========== 阶段2：非阻塞快速路径（无锁预判） ==========
+	// 非阻塞模式 + channel 未关闭 + channel 已满 → 直接返回失败
+	// 这是无锁的快速判断，避免不必要的加锁开销，提升 select 非阻塞场景性能
+	// 存在极小的竞态窗口，但后续加锁后会二次校验，保证正确性
+	if !block && c.closed == 0 && full(c) {
+		return false
+	}
+
+	// 阻塞性能采样：记录发送开始时间，用于统计阻塞耗时
+	var t0 int64
+	if blockprofilerate > 0 {
+		t0 = cputicks()
+	}
+
+	// ========== 阶段3：加锁进入临界区，核心发送逻辑 ==========
+	lock(&c.lock)
+
+	// 校验：向已关闭的 channel 发送数据，直接 panic
+	// 语言规范：关闭的 channel 禁止发送，仅允许接收剩余数据
+	if c.closed != 0 {
+		unlock(&c.lock)
+		panic(plainError("send on closed channel"))
+	}
+
+	// 发送路径1：有接收者正在等待 → 直接发送，跳过缓冲区
+	// 从接收等待队列 recvq 中取出一个阻塞的接收 goroutine
+	if sg := c.recvq.dequeue(); sg != nil {
+		// send 函数完成三件事：
+		// 1. 将待发送元素直接拷贝到接收者的内存地址
+		// 2. 唤醒接收 goroutine
+		// 3. 释放 channel 锁
+		// 这是最快的发送路径，无需经过环形缓冲区拷贝
+		send(c, sg, ep, func() { unlock(&c.lock) }, 3)
+		return true
+	}
+
+	// 发送路径2：缓冲区有空位 → 写入环形缓冲区
+	if c.qcount < c.dataqsiz {
+		// 计算当前发送索引 sendx 对应的缓冲区内存地址
+		qp := chanbuf(c, c.sendx)
+
+		// 竞态检测开启时，记录该缓冲区位置的写入事件
+		if raceenabled {
+			racenotify(c, c.sendx, nil)
+		}
+
+		// 类型安全的内存拷贝：将元素 ep 拷贝到缓冲区位置 qp
+		typedmemmove(c.elemtype, qp, ep)
+
+		// 发送索引后移，形成环形队列：到达末尾则归零
+		c.sendx++
+		if c.sendx == c.dataqsiz {
+			c.sendx = 0
+		}
+		// 缓冲区元素计数 +1
+		c.qcount++
+
+		unlock(&c.lock)
+		return true
+	}
+
+	// 发送路径3：缓冲区已满 + 非阻塞模式 → 直接返回失败
+	if !block {
+		unlock(&c.lock)
+		return false
+	}
+
+	// ========== 阶段4：阻塞模式，当前 goroutine 入队休眠 ==========
+	// 获取当前 goroutine 结构体
+	gp := getg()
+	// 从 sudog 缓存池申请一个等待节点（sudog 是 goroutine 等待队列的封装）
+	mysg := acquireSudog()
+	// 初始化释放时间标记：-1 表示需要统计阻塞时长
+	mysg.releasetime = 0
+	if t0 != 0 {
+		mysg.releasetime = -1
+	}
+
+	// 绑定待发送元素的地址，被唤醒后接收方会直接从这里读取数据
+	mysg.elem.set(ep)
+	mysg.waitlink = nil
+	// 绑定当前 goroutine
+	mysg.g = gp
+	// 标记是否处于 select 多路复用场景
+	mysg.isSelect = false
+	// 绑定当前 channel
+	mysg.c.set(c)
+	// 当前 goroutine 标记自身正在等待该 sudog
+	gp.waiting = mysg
+	gp.param = nil
+
+	// 将当前等待节点加入 channel 的发送等待队列尾部
+	c.sendq.enqueue(mysg)
+	// 标记 goroutine 正在 channel 上挂起，用于 GC 安全处理
+	gp.parkingOnChan.Store(true)
+	reason := waitReasonChanSend
+
+	// 挂起当前 goroutine，让出 CPU
+	// chanparkcommit 会在挂起前原子性地释放 channel 锁，避免唤醒竞态
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), reason, traceBlockChanSend, 2)
+	// 保活元素指针：防止挂起期间 GC 回收 ep 指向的内存
+	KeepAlive(ep)
+
+	// ========== 阶段5：goroutine 被唤醒，后续处理 ==========
+	// 防御性校验：等待节点必须与自身绑定，否则队列结构损坏
+	if mysg != gp.waiting {
+		throw("G waiting list is corrupted")
+	}
+	// 清空等待标记
+	gp.waiting = nil
+	gp.activeStackChans = false
+
+	// 判断唤醒原因：success=false 表示是 channel 关闭导致的唤醒
+	closed := !mysg.success
+	gp.param = nil
+
+	// 统计阻塞耗时，写入性能分析器
+	if mysg.releasetime > 0 {
+		blockevent(mysg.releasetime-t0, 2)
+	}
+
+	// 解除与 channel 的绑定，归还 sudog 到缓存池
+	mysg.c.set(nil)
+	releaseSudog(mysg)
+
+	// 如果是因 channel 关闭被唤醒，触发 panic
+	if closed {
+		// 二次校验 channel 确实已关闭，防止虚假唤醒
+		if c.closed == 0 {
+			throw("chansend: spurious wakeup")
+		}
+		panic(plainError("send on closed channel"))
+	}
+
+	// 正常唤醒：发送成功
+	return true
+}
+
+```
+
 ### Exp1() goroutine和channel的阻塞运行
 
 ```go
