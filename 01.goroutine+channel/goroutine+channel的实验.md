@@ -355,6 +355,51 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 
 ```
 
+### 进行channel排空的源码
+
+```go
+
+// timerchandrain 排空指定 channel 缓冲队列中的全部元素
+// 参数 c: 待操作的 channel 底层结构体指针
+// 返回值: 若成功清空了至少一个元素则返回 true；若 channel 本就为空则返回 false
+func timerchandrain(c *hchan) bool {
+	// 无锁快速路径：原子读取当前元素数量，若队列为空直接返回，避免不必要的加锁开销
+	if atomic.Loaduint(&c.qcount) == 0 {
+		return false
+	}
+
+	// 加 channel 全局锁，保证清空过程的并发安全性，防止期间有其他协程读写 channel
+	lock(&c.lock)
+
+	any := false // 标记位：记录本次是否真的清空了元素
+
+	// 循环遍历，逐个清空缓冲队列里的所有元素
+	for c.qcount > 0 {
+		any = true // 进入循环说明队列非空，标记为有元素被清空
+
+		// 按元素类型清空当前读指针位置的元素内存，清零数据避免内存泄漏、防止悬挂指针
+		typedmemclr(c.elemtype, chanbuf(c, c.recvx))
+
+		// 读指针后移一位
+		c.recvx++
+		// 环形队列边界处理：读指针到达队列末尾时重置为0，实现环形循环
+		if c.recvx == c.dataqsiz {
+			c.recvx = 0
+		}
+
+		// 队列元素计数减1
+		c.qcount--
+	}
+
+	// 释放 channel 锁
+	unlock(&c.lock)
+
+	return any
+}
+
+```
+
+
 ### Exp1() goroutine和channel的阻塞运行
 
 ```go
