@@ -399,6 +399,24 @@ func timerchandrain(c *hchan) bool {
 
 ```
 
+### empty 源码分析
+
+```go
+func empty(c *hchan) bool {
+	if c.dataqsiz == 0 { //环形缓冲区大小为0，即无缓冲元素
+		return atomic.Loadp(unsafe.Pointer(&c.sendq.first)) == nil //若是存在等待的传入的协程则不为空
+	}
+
+	if c.timer != nil { //和定时器有关
+		c.timer.maybeRunChan(c)
+	}
+	return atomic.Loaduint(&c.qcount) == 0 //c.qcount是当前缓冲区已存储的元素数量
+}
+
+
+```
+
+		无缓冲channel有阻塞的发送者也判定为空
 
 ### Exp1() goroutine和channel的阻塞运行
 
