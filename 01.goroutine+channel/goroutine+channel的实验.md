@@ -418,6 +418,42 @@ func empty(c *hchan) bool {
 
 		无缓冲channel有阻塞的发送者也判定为空
 
+
+### 获取容量和长度的源码
+
+```go
+
+func chanlen(c *hchan) int {
+	if c == nil {
+		return 0
+	}
+	async := debug.asynctimerchan.Load() != 0
+	if c.timer != nil && async {
+		c.timer.maybeRunChan(c)
+	}
+	if c.timer != nil && !async {
+		return 0
+	}
+	return int(c.qcount)
+}
+
+func chancap(c *hchan) int {
+	if c == nil {
+		return 0
+	}
+	if c.timer != nil {
+		async := debug.asynctimerchan.Load() != 0 // channel 定时器相关用于调试
+		if async {
+			return int(c.dataqsiz)
+		}
+		return 0
+	}
+	return int(c.dataqsiz)
+}
+
+```
+
+
 ### Exp1() goroutine和channel的阻塞运行
 
 ```go
